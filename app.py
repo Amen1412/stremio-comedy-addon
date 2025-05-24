@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
 from datetime import datetime
@@ -10,89 +10,81 @@ CORS(app)
 TMDB_API_KEY = "29dfffa9ae088178fa088680b67ce583"
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 
-feel_good_cache = []
+# Global cache
+feel_good_movies_cache = []
 
-# IDs: Comedy=35, Drama=18, Romance=10749
-FEEL_GOOD_GENRES = {"35", "18", "10749"}
-EXCLUDED_GENRES = {"16"}  # Animation (kids-style)
-
-def fetch_feel_good_movies():
-    global feel_good_cache
-    print("[CACHE] Fetching Feel Good OTT movies...")
+# Fetch feel-good movies (loose genre/keyword match + OTT filter)
+def fetch_and_cache_movies():
+    global feel_good_movies_cache
+    print("[CACHE] Fetching feel-good OTT movies...")
 
     today = datetime.now().strftime("%Y-%m-%d")
     final_movies = []
+    seen_ids = set()
 
-    for page in range(1, 1000):  # max page limit TMDB allows
+    # Loop through TMDB pages until exhausted
+    for page in range(1, 1000):
         print(f"[INFO] Checking page {page}")
         params = {
             "api_key": TMDB_API_KEY,
             "sort_by": "popularity.desc",
             "release_date.lte": today,
+            "with_watch_monetization_types": "flatrate",
+            "include_adult": False,
             "page": page
         }
 
         try:
             response = requests.get(f"{TMDB_BASE_URL}/discover/movie", params=params)
-            results = response.json().get("results", [])
+            data = response.json()
+            results = data.get("results", [])
             if not results:
                 break
 
             for movie in results:
-                movie_id = movie.get("id")
-                title = movie.get("title")
-                genre_ids = set(str(g) for g in movie.get("genre_ids", []))
-
-                # Genre filter
-                if not genre_ids & FEEL_GOOD_GENRES or genre_ids & EXCLUDED_GENRES:
+                if not movie.get("id") or not movie.get("title"):
                     continue
 
+                movie_id = movie["id"]
+
                 # Skip if already added
-                if any(m.get("id") == movie_id for m in final_movies):
+                if movie_id in seen_ids:
                     continue
 
                 # Check OTT availability
-                providers_url = f"{TMDB_BASE_URL}/movie/{movie_id}/watch/providers"
-                prov_response = requests.get(providers_url, params={"api_key": TMDB_API_KEY})
-                prov_data = prov_response.json()
+                prov_url = f"{TMDB_BASE_URL}/movie/{movie_id}/watch/providers"
+                prov_res = requests.get(prov_url, params={"api_key": TMDB_API_KEY})
+                prov_data = prov_res.json()
+                if not prov_data.get("results") or not prov_data["results"].get("IN"):
+                    continue
+                if "flatrate" not in prov_data["results"]["IN"]:
+                    continue
 
-                if "results" in prov_data and any("flatrate" in v for v in prov_data["results"].values()):
-                    ext_url = f"{TMDB_BASE_URL}/movie/{movie_id}/external_ids"
-                    ext_response = requests.get(ext_url, params={"api_key": TMDB_API_KEY})
-                    ext_data = ext_response.json()
-                    imdb_id = ext_data.get("imdb_id")
+                # Get IMDb ID
+                ext_url = f"{TMDB_BASE_URL}/movie/{movie_id}/external_ids"
+                ext_res = requests.get(ext_url, params={"api_key": TMDB_API_KEY})
+                ext_data = ext_res.json()
+                imdb_id = ext_data.get("imdb_id")
 
-                    if imdb_id and imdb_id.startswith("tt"):
-                        movie["imdb_id"] = imdb_id
-                        final_movies.append(movie)
+                if imdb_id and imdb_id.startswith("tt"):
+                    movie["imdb_id"] = imdb_id
+                    final_movies.append(movie)
+                    seen_ids.add(movie_id)
 
         except Exception as e:
             print(f"[ERROR] Page {page} failed: {e}")
             break
 
-    # Deduplicate
-    seen_ids = set()
-    unique_movies = []
-    for movie in final_movies:
-        imdb_id = movie.get("imdb_id")
-        if imdb_id and imdb_id not in seen_ids:
-            seen_ids.add(imdb_id)
-            unique_movies.append(movie)
+    feel_good_movies_cache = final_movies
+    print(f"[CACHE] Fetched {len(feel_good_movies_cache)} feel-good OTT movies ✅")
 
-    feel_good_cache = unique_movies
-    print(f"[CACHE] Fetched {len(feel_good_cache)} Feel Good movies ✅")
-
+# Convert TMDB movie data to Stremio meta
 def to_stremio_meta(movie):
     try:
-        imdb_id = movie.get("imdb_id")
-        title = movie.get("title")
-        if not imdb_id or not title:
-            return None
-
         return {
-            "id": imdb_id,
+            "id": movie["imdb_id"],
             "type": "movie",
-            "name": title,
+            "name": movie["title"],
             "poster": f"https://image.tmdb.org/t/p/w500{movie['poster_path']}" if movie.get("poster_path") else None,
             "description": movie.get("overview", ""),
             "releaseInfo": movie.get("release_date", ""),
@@ -102,13 +94,14 @@ def to_stremio_meta(movie):
         print(f"[ERROR] to_stremio_meta failed: {e}")
         return None
 
+# Stremio manifest
 @app.route("/manifest.json")
 def manifest():
     return jsonify({
         "id": "org.feelgood.catalog",
         "version": "1.0.0",
         "name": "Feel Good",
-        "description": "Feel Good Movies on OTT",
+        "description": "Feel-Good & Heartwarming Movies on OTT",
         "resources": ["catalog"],
         "types": ["movie"],
         "catalogs": [{
@@ -119,36 +112,33 @@ def manifest():
         "idPrefixes": ["tt"]
     })
 
+# Catalog endpoint
 @app.route("/catalog/movie/feelgood.json")
 def catalog():
-    print("[INFO] Catalog requested")
+    print("[INFO] Feel Good catalog requested")
     try:
-        metas = [meta for meta in (to_stremio_meta(m) for m in feel_good_cache) if meta]
-        print(f"[INFO] Returning {len(metas)} total movies ✅")
+        metas = [meta for meta in (to_stremio_meta(m) for m in feel_good_movies_cache) if meta]
+        print(f"[INFO] Returning {len(metas)} movies ✅")
         return jsonify({"metas": metas})
     except Exception as e:
         print(f"[ERROR] Catalog error: {e}")
         return jsonify({"metas": []})
 
+# Manual refresh
 @app.route("/refresh")
 def refresh():
     def do_refresh():
         try:
-            fetch_feel_good_movies()
+            fetch_and_cache_movies()
             print("[REFRESH] Background refresh complete ✅")
         except Exception as e:
             import traceback
             print(f"[REFRESH ERROR] {traceback.format_exc()}")
-
     threading.Thread(target=do_refresh).start()
     return jsonify({"status": "refresh started in background"})
 
-# Fetch on startup
-fetch_feel_good_movies()
-
-import os
+# Start background fetch after server is up
+threading.Thread(target=fetch_and_cache_movies).start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))  # Fallback to 10000 locally
-    app.run(host="0.0.0.0", port=port)
-
+    app.run(host="0.0.0.0", port=7000)

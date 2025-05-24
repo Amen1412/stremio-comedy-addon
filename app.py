@@ -146,5 +146,9 @@ def refresh():
 # Fetch on startup
 fetch_feel_good_movies()
 
+import os
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=7000)
+    port = int(os.environ.get("PORT", 10000))  # Fallback to 10000 locally
+    app.run(host="0.0.0.0", port=port)
+

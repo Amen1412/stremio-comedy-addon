@@ -16,7 +16,7 @@ comedy_movies_cache = []
 
 def fetch_and_cache_comedy_movies():
     global comedy_movies_cache
-    print("[CACHE] Fetching Comedy OTT movies...")
+    print("[CACHE] Fetching Comedy Movies (No OTT filter)...")
 
     final_movies = []
 
@@ -33,9 +33,10 @@ def fetch_and_cache_comedy_movies():
             response = requests.get(f"{TMDB_BASE_URL}/discover/movie", params=params)
             results = response.json().get("results", [])
 
-            # ✅ Always continue unless error or empty page
             if results is None or len(results) == 0:
                 break
+
+            print(f"[INFO] Page {page} returned {len(results)} movies")
 
             for movie in results:
                 movie_id = movie.get("id")
@@ -43,26 +44,19 @@ def fetch_and_cache_comedy_movies():
                 if not movie_id or not title:
                     continue
 
-                # Check OTT availability globally
-                providers_url = f"{TMDB_BASE_URL}/movie/{movie_id}/watch/providers"
-                prov_response = requests.get(providers_url, params={"api_key": TMDB_API_KEY})
-                prov_data = prov_response.json()
+                # Get IMDb ID (needed for Stremio)
+                ext_url = f"{TMDB_BASE_URL}/movie/{movie_id}/external_ids"
+                ext_response = requests.get(ext_url, params={"api_key": TMDB_API_KEY})
+                ext_data = ext_response.json()
+                imdb_id = ext_data.get("imdb_id")
 
-                if "results" in prov_data:
-                    has_ott = any(
-                        "flatrate" in prov_data["results"].get(region, {})
-                        for region in prov_data["results"]
-                    )
-                    if has_ott:
-                        # Get IMDb ID
-                        ext_url = f"{TMDB_BASE_URL}/movie/{movie_id}/external_ids"
-                        ext_response = requests.get(ext_url, params={"api_key": TMDB_API_KEY})
-                        ext_data = ext_response.json()
-                        imdb_id = ext_data.get("imdb_id")
+                if not imdb_id or not imdb_id.startswith("tt"):
+                    print(f"[SKIP] No IMDb ID: {title}")
+                    continue
 
-                        if imdb_id and imdb_id.startswith("tt"):
-                            movie["imdb_id"] = imdb_id
-                            final_movies.append(movie)
+                movie["imdb_id"] = imdb_id
+                final_movies.append(movie)
+                print(f"[OK] Added: {title}")
 
         except Exception as e:
             print(f"[ERROR] Page {page} failed: {e}")
@@ -78,7 +72,7 @@ def fetch_and_cache_comedy_movies():
             unique_movies.append(movie)
 
     comedy_movies_cache = unique_movies
-    print(f"[CACHE] Fetched {len(comedy_movies_cache)} Comedy OTT movies ✅")
+    print(f"[CACHE] Total comedy movies cached: {len(comedy_movies_cache)} ✅")
 
 
 def to_stremio_meta(movie):
@@ -108,7 +102,7 @@ def manifest():
         "id": "org.comedy.catalog",
         "version": "1.0.0",
         "name": "Comedy",
-        "description": "Comedy Movies available on OTT",
+        "description": "Popular Comedy Movies (any language)",
         "resources": ["catalog"],
         "types": ["movie"],
         "catalogs": [{
@@ -123,10 +117,9 @@ def manifest():
 @app.route("/catalog/movie/comedy.json")
 def catalog():
     print("[INFO] Catalog requested")
-
     try:
         metas = [meta for meta in (to_stremio_meta(m) for m in comedy_movies_cache) if meta]
-        print(f"[INFO] Returning {len(metas)} total comedy movies ✅")
+        print(f"[INFO] Returning {len(metas)} comedy movies to Stremio ✅")
         return jsonify({"metas": metas})
     except Exception as e:
         print(f"[ERROR] Catalog error: {e}")
@@ -155,7 +148,7 @@ def status():
     })
 
 
-# ✅ Start fetch in background to avoid blocking port binding
+# Start fetch in background so port binds quickly for Render
 def run_fetch_in_background():
     def bg():
         try:

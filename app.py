@@ -144,11 +144,17 @@ def refresh():
     return jsonify({"status": "refresh started in background"})
 
 
-# Fetch on startup
-fetch_and_cache_comedy_movies()
+# Fetch on startup in background so Render detects open port early
+def run_fetch_in_background():
+    def bg():
+        try:
+            fetch_and_cache_comedy_movies()
+        except Exception as e:
+            print(f"[STARTUP ERROR] {e}")
+    threading.Thread(target=bg).start()
+
+run_fetch_in_background()
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 7000))
     app.run(host="0.0.0.0", port=port)
-

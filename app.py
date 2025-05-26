@@ -3,6 +3,7 @@ from flask_cors import CORS
 import requests
 from datetime import datetime
 import threading
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -31,7 +32,9 @@ def fetch_and_cache_comedy_movies():
         try:
             response = requests.get(f"{TMDB_BASE_URL}/discover/movie", params=params)
             results = response.json().get("results", [])
-            if not results:
+
+            # ✅ Always continue unless error or empty page
+            if results is None or len(results) == 0:
                 break
 
             for movie in results:
@@ -47,11 +50,11 @@ def fetch_and_cache_comedy_movies():
 
                 if "results" in prov_data:
                     has_ott = any(
-                        "flatrate" in prov_data["results"][region]
+                        "flatrate" in prov_data["results"].get(region, {})
                         for region in prov_data["results"]
                     )
                     if has_ott:
-                        # Now get IMDb ID
+                        # Get IMDb ID
                         ext_url = f"{TMDB_BASE_URL}/movie/{movie_id}/external_ids"
                         ext_response = requests.get(ext_url, params={"api_key": TMDB_API_KEY})
                         ext_data = ext_response.json()
@@ -135,7 +138,7 @@ def refresh():
     def do_refresh():
         try:
             fetch_and_cache_comedy_movies()
-            print("[REFRESH] Background refresh complete ✅")
+            print("[REFRESH] Manual refresh complete ✅")
         except Exception as e:
             import traceback
             print(f"[REFRESH ERROR] {traceback.format_exc()}")
@@ -144,7 +147,15 @@ def refresh():
     return jsonify({"status": "refresh started in background"})
 
 
-# Fetch on startup in background so Render detects open port early
+@app.route("/status")
+def status():
+    return jsonify({
+        "cached_movies": len(comedy_movies_cache),
+        "example": comedy_movies_cache[0] if comedy_movies_cache else "Still loading..."
+    })
+
+
+# ✅ Start fetch in background to avoid blocking port binding
 def run_fetch_in_background():
     def bg():
         try:
